@@ -6,6 +6,8 @@ import "./onboarding.css";
 type View = "home" | "plans" | "assessment" | "waiting" | "session" | "history" | "admin";
 type Point = { x: number; y: number };
 type MotionState = "idle" | "walking" | "sitting" | "reading" | "coffee" | "water";
+type AccountSession = { id:string; status:string; summary:string|null; started_at:string; ended_at:string|null };
+type AccountData = { user:{id:string;email:string;name:string;plan:string}; assessment:{concern:string;intensity:number;duration:string;impacts:string[];goal:string}|null; sessions:AccountSession[]; currentSessionId:string|null; messages:{role:string;content:string;created_at:string}[] };
 
 const quickPrompts = [
   "Quero organizar meus pensamentos",
@@ -43,6 +45,8 @@ function Icon({ name, size = 18 }: { name: string; size?: number }) {
 export default function Home() {
   const [view, setView] = useState<View>("home");
   const [logged, setLogged] = useState(false);
+  const [accountName, setAccountName] = useState("");
+  const [accountSessions, setAccountSessions] = useState<AccountSession[]>([]);
   const [showLogin, setShowLogin] = useState(false);
   const [avatar, setAvatar] = useState<Point>({ x: 48, y: 63 });
   const [action, setAction] = useState("Explorando a sala");
@@ -59,11 +63,24 @@ export default function Home() {
   const [selectedPlan, setSelectedPlan] = useState("Essencial");
   const [profile, setProfile] = useState({ name: "", email: "", password: "", concern: "", intensity: "", duration: "", impact: [] as string[], goal: "", safety: "" });
   const [messages, setMessages] = useState([
-    { role: "ai", text: "Olá, Marina. Eu sou a Serena, uma agente virtual de IA. Este é um espaço de escuta e reflexão — não substituo uma psicóloga ou atendimento médico. Como você está chegando hoje?", source: "Protocolo de acolhimento v2" },
+    { role: "ai", text: "Olá. Eu sou a Serena, uma agente virtual de IA. Este é um espaço de escuta e reflexão — não substituo uma psicóloga ou atendimento médico. Como você está chegando hoje?", source: "Protocolo de acolhimento v2" },
   ]);
   const [tab, setTab] = useState<"documents" | "sessions">("documents");
   const inputRef = useRef<HTMLInputElement>(null);
   const motionTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  async function loadAccount() {
+    const response = await fetch("/api/account", { cache: "no-store" });
+    if (!response.ok) return false;
+    const data = await response.json() as AccountData;
+    setLogged(true); setAccountName(data.user.name); setAccountSessions(data.sessions || []);
+    setProfile((current) => ({ ...current, name:data.user.name, email:data.user.email, concern:data.assessment?.concern || current.concern, intensity:String(data.assessment?.intensity || current.intensity), duration:data.assessment?.duration || current.duration, impact:data.assessment?.impacts || current.impact, goal:data.assessment?.goal || current.goal }));
+    if (data.currentSessionId) setSessionId(data.currentSessionId);
+    if (data.messages?.length) setMessages(data.messages.map((message) => ({ role:message.role === "assistant" ? "ai" : message.role, text:message.content, source:"" })));
+    return true;
+  }
+
+  useEffect(() => { loadAccount().catch(() => false); }, []);
 
   useEffect(() => {
     if (view !== "waiting" || seconds <= 0) return;
@@ -102,9 +119,20 @@ export default function Home() {
         if (data.code === "CLOUD_SETUP_REQUIRED") return "A conta na nuvem ainda precisa ser ativada.";
         return data.error || "E-mail ou senha inválidos.";
       }
-      setLogged(true); setShowLogin(false); setView("waiting");
+      await loadAccount(); setShowLogin(false); setView("history");
       return "";
     } catch { return "Não foi possível entrar agora."; }
+  }
+
+  async function signUp(name:string, email:string, password:string) {
+    try {
+      const response = await fetch("/api/auth/signup", { method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({name,email,password}) });
+      const data = await response.json() as { error?:string; confirmationRequired?:boolean };
+      if (!response.ok) return data.error || "Não foi possível criar sua conta.";
+      if (data.confirmationRequired) return "Conta criada. Confirme o e-mail recebido e depois entre por aqui.";
+      await loadAccount(); setShowLogin(false); setView("plans");
+      return "";
+    } catch { return "Não foi possível criar sua conta agora."; }
   }
 
   function choosePlan(plan: string) {
@@ -114,17 +142,19 @@ export default function Home() {
   async function finishAssessment() {
     const name = profile.name.trim().split(" ")[0] || "você";
     const context = `Queixa principal: ${profile.concern}. Intensidade: ${profile.intensity}/10. Duração: ${profile.duration}. Impactos: ${profile.impact.join(", ") || "não informados"}. Objetivo: ${profile.goal}.`;
-    setLogged(true);
     setMessages([{ role: "ai", text: `Olá, ${name}. Obrigada por compartilhar essas informações antes da conversa. Entendi que ${profile.concern.toLowerCase()} tem sido a parte mais difícil e que você gostaria de ${profile.goal.toLowerCase()}. Podemos começar pelo momento em que isso mais pesa no seu dia?`, source: `Avaliação inicial · plano ${selectedPlan}` }, { role: "system", text: context, source: "" }]);
     try {
-      const signup = await fetch("/api/auth/signup", { method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({ name:profile.name, email:profile.email, password:profile.password }) });
-      const signupData = await signup.json() as { confirmationRequired?:boolean; code?:string; error?:string };
-      if (!signup.ok && signupData.code !== "CLOUD_SETUP_REQUIRED") throw new Error(signupData.error || "Não foi possível criar a conta");
-      if (signupData.confirmationRequired) throw new Error("Confirme o e-mail enviado pelo Supabase e depois entre para continuar.");
+      if (!logged) {
+        const signup = await fetch("/api/auth/signup", { method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({ name:profile.name, email:profile.email, password:profile.password }) });
+        const signupData = await signup.json() as { confirmationRequired?:boolean; code?:string; error?:string };
+        if (!signup.ok && signupData.code !== "CLOUD_SETUP_REQUIRED") throw new Error(signupData.error || "Não foi possível criar a conta");
+        if (signupData.confirmationRequired) throw new Error("Confirme o e-mail enviado pelo Supabase e depois entre para continuar.");
+      }
       const onboarding = await fetch("/api/onboarding", { method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({...profile,plan:selectedPlan}) });
       const onboardingData = await onboarding.json() as { sessionId?:string|number; error?:string };
       if (!onboarding.ok) throw new Error(onboardingData.error || "Não foi possível salvar a avaliação");
       if (onboardingData.sessionId) setSessionId(String(onboardingData.sessionId));
+      setLogged(true); setAccountName(profile.name.trim());
     } catch (error) {
       setAiError(error instanceof Error ? error.message : "Não foi possível concluir o cadastro.");
       return;
@@ -212,21 +242,21 @@ export default function Home() {
           <button className={view === "waiting" ? "active" : ""} onClick={() => navigate("waiting")}>Sala de espera</button>
           <button className={view === "history" ? "active" : ""} onClick={() => navigate("history")}>Minha jornada</button>
         </nav>
-        <div className="top-actions"><button className="help" onClick={() => alert("Se você estiver em perigo imediato, ligue 192. Apoio emocional: CVV 188.")}>Preciso de ajuda agora</button>{logged ? <button className="profile" onClick={() => setView("history")}><span className="mini-avatar">M</span><span>Marina<small>Meu espaço</small></span><b>⌄</b></button> : <button className="primary small" onClick={() => setShowLogin(true)}>Entrar</button>}</div>
+        <div className="top-actions"><button className="help" onClick={() => alert("Se você estiver em perigo imediato, ligue 192. Apoio emocional: CVV 188.")}>Preciso de ajuda agora</button>{logged ? <button className="profile" onClick={() => setView("history")}><span className="mini-avatar">{(accountName || "V").charAt(0).toUpperCase()}</span><span>{accountName || "Meu perfil"}<small>Meu espaço</small></span><b>⌄</b></button> : <><button className="account-create" onClick={() => setShowLogin(true)}>Criar conta</button><button className="primary small" onClick={() => setShowLogin(true)}>Entrar</button></>}</div>
       </header>
 
       <main>
         {view === "home" && <Landing onStart={() => logged ? setView("waiting") : setView("plans")} />}
         {view === "plans" && <Plans onChoose={choosePlan} />}
-        {view === "assessment" && <Assessment profile={profile} setProfile={setProfile} plan={selectedPlan} onFinish={finishAssessment} />}
+        {view === "assessment" && <Assessment profile={profile} setProfile={setProfile} plan={selectedPlan} returning={logged} onFinish={finishAssessment} />}
         {view === "waiting" && <Waiting avatar={avatar} action={action} motionState={motionState} queue={queue} time={time} seconds={seconds} onInteract={interact} onEnter={() => setView("session")} />}
         {view === "session" && <Session messages={messages.filter((message) => message.role !== "system")} input={input} listening={listening} speaking={speaking} thinking={thinking} aiError={aiError} voiceStatus={voiceStatus} setInput={setInput} send={send} toggleVoice={toggleVoice} inputRef={inputRef} />}
-        {view === "history" && <History onContinue={() => setView("session")} />}
+        {view === "history" && <History name={accountName} sessions={accountSessions} onContinue={() => setView("session")} />}
         {view === "admin" && <Admin tab={tab} setTab={setTab} />}
       </main>
 
       {logged && <button className="admin-link" onClick={() => setView(view === "admin" ? "home" : "admin")}><Icon name={view === "admin" ? "home" : "settings"} /> {view === "admin" ? "Voltar ao app" : "Painel administrativo"}</button>}
-      {showLogin && <LoginModal onClose={() => setShowLogin(false)} onSignIn={signIn} />}
+      {showLogin && <LoginModal onClose={() => setShowLogin(false)} onSignIn={signIn} onSignUp={signUp} />}
     </div>
   );
 }
@@ -252,11 +282,11 @@ function Plans({ onChoose }: { onChoose: (plan: string) => void }) {
   return <div className="plans-page"><div className="plans-hero"><span className="eyebrow">Escolha sua jornada</span><h1>Um plano para o seu momento.</h1><p>Comece com uma avaliação breve. Você pode mudar ou cancelar quando quiser.</p></div><div className="plan-grid">{plans.map((plan) => <article key={plan.name} className={plan.featured ? "featured" : ""}>{plan.featured && <span className="recommended">Mais escolhido</span>}<h2>{plan.name}</h2><div className="plan-price"><b>{plan.price}</b><span>/mês</span></div><p>{plan.cadence}</p><ul>{plan.features.map((feature) => <li key={feature}>✓ {feature}</li>)}</ul><button className={plan.featured ? "primary full" : "plan-button"} onClick={() => onChoose(plan.name)}>Escolher {plan.name} →</button></article>)}</div><SafetyNote compact /></div>;
 }
 
-function Assessment({ profile, setProfile, plan, onFinish }: { profile: {name:string;email:string;password:string;concern:string;intensity:string;duration:string;impact:string[];goal:string;safety:string}; setProfile: React.Dispatch<React.SetStateAction<{name:string;email:string;password:string;concern:string;intensity:string;duration:string;impact:string[];goal:string;safety:string}>>; plan:string; onFinish:()=>void }) {
+function Assessment({ profile, setProfile, plan, returning, onFinish }: { profile: {name:string;email:string;password:string;concern:string;intensity:string;duration:string;impact:string[];goal:string;safety:string}; setProfile: React.Dispatch<React.SetStateAction<{name:string;email:string;password:string;concern:string;intensity:string;duration:string;impact:string[];goal:string;safety:string}>>; plan:string; returning:boolean; onFinish:()=>void }) {
   const [step, setStep] = useState(0);
   const update = (key: keyof typeof profile, value: string | string[]) => setProfile((current) => ({...current, [key]: value}));
   const impacts = ["Trabalho ou estudos", "Sono", "Relacionamentos", "Energia", "Autocuidado"];
-  const valid = step === 0 ? profile.name && profile.email && profile.password.length >= 6 : step === 1 ? profile.concern && profile.intensity && profile.duration : profile.goal && profile.safety;
+  const valid = step === 0 ? profile.name && profile.email && (returning || profile.password.length >= 6) : step === 1 ? profile.concern && profile.intensity && profile.duration : profile.goal && profile.safety;
   return <div className="assessment-page"><section className="assessment-card"><header><div><span className="eyebrow">Plano {plan}</span><h1>{step === 0 ? "Vamos criar seu espaço" : step === 1 ? "Como isso tem afetado você?" : "O que você espera desta jornada?"}</h1></div><span className="step-count">{step + 1} de 3</span></header><div className="progress"><i style={{width:`${((step+1)/3)*100}%`}}/></div>{step === 0 && <div className="form-grid"><label>Como gostaria de ser chamado?<input value={profile.name} onChange={(e)=>update("name",e.target.value)} placeholder="Seu nome"/></label><label>E-mail<input value={profile.email} onChange={(e)=>update("email",e.target.value)} type="email" placeholder="voce@exemplo.com"/></label><label className="wide">Crie uma senha<input value={profile.password} onChange={(e)=>update("password",e.target.value)} type="password" placeholder="Pelo menos 6 caracteres"/></label><p className="form-note wide"><Icon name="shield"/> Seus dados ajudam a personalizar a conversa e não substituem avaliação clínica.</p></div>}{step === 1 && <div className="assessment-fields"><label>O que mais está pesando neste momento?<textarea value={profile.concern} onChange={(e)=>update("concern",e.target.value)} placeholder="Conte com suas palavras. Ex.: a pressão no trabalho está me esgotando."/></label><label>Há quanto tempo isso acontece?<select value={profile.duration} onChange={(e)=>update("duration",e.target.value)}><option value="">Selecione</option><option>Há alguns dias</option><option>Há algumas semanas</option><option>Há alguns meses</option><option>Há mais de um ano</option></select></label><label>Quanto isso incomoda hoje? <b>{profile.intensity || "—"}/10</b><input type="range" min="1" max="10" value={profile.intensity || "5"} onChange={(e)=>update("intensity",e.target.value)}/></label><fieldset><legend>Quais áreas foram afetadas?</legend><div className="choice-chips">{impacts.map((item)=><button type="button" key={item} className={profile.impact.includes(item)?"selected":""} onClick={()=>update("impact",profile.impact.includes(item)?profile.impact.filter(x=>x!==item):[...profile.impact,item])}>{item}</button>)}</div></fieldset></div>}{step === 2 && <div className="assessment-fields"><label>O que gostaria de conseguir primeiro?<textarea value={profile.goal} onChange={(e)=>update("goal",e.target.value)} placeholder="Ex.: organizar meus pensamentos e lidar melhor com a cobrança."/></label><fieldset><legend>Para sua segurança: você corre risco imediato ou pensa em se machucar agora?</legend><div className="safety-options"><button type="button" className={profile.safety==="no"?"selected":""} onClick={()=>update("safety","no")}>Não, estou em segurança</button><button type="button" className={profile.safety==="yes"?"danger selected":"danger"} onClick={()=>update("safety","yes")}>Sim ou não tenho certeza</button></div></fieldset>{profile.safety === "yes" && <div className="crisis-box"><b>Você merece apoio humano agora.</b><p>Se houver perigo imediato, ligue 192 ou vá a uma emergência. Para apoio emocional, ligue gratuitamente para o CVV no 188. Se puder, chame alguém de confiança para ficar com você.</p></div>}<div className="journey-preview"><Icon name="chat"/><div><b>Como Serena usará isso</b><span>Ela começará reconhecendo sua queixa e seu objetivo, sem diagnosticar ou prescrever.</span></div></div></div>}<footer>{step > 0 && <button className="back-button" onClick={()=>setStep(step-1)}>← Voltar</button>}<button className="primary" disabled={!valid || profile.safety === "yes"} onClick={()=>step < 2 ? setStep(step+1) : onFinish()}>{step < 2 ? "Continuar →" : "Ir para a sala de espera →"}</button></footer></section></div>;
 }
 
@@ -291,13 +321,17 @@ function Session({ messages, input, listening, speaking, thinking, aiError, voic
   </div></div>;
 }
 
-function History({ onContinue }: { onContinue:()=>void }) { return <div className="page history-page"><div className="page-title"><div><span className="eyebrow">Minha jornada</span><h1>Um passo de cada vez, Marina.</h1><p>Revisite suas conversas e perceba o caminho que já percorreu.</p></div><button className="primary" onClick={onContinue}>Nova conversa →</button></div><div className="journey-grid"><section className="summary-card"><span>Nas últimas 4 semanas</span><div className="big-number">7 <small>conversas</small></div><div className="mood-chart"><i style={{height:"30%"}}/><i style={{height:"45%"}}/><i style={{height:"40%"}}/><i style={{height:"65%"}}/><i style={{height:"58%"}}/><i style={{height:"76%"}}/><i style={{height:"84%"}}/></div><p>Sua frequência de reflexão aumentou <b>24%</b></p></section><section className="themes-card"><h3>Temas que apareceram</h3>{["Autocuidado", "Sono", "Relações", "Rotina"].map((x,i)=><div key={x}><span>{x}</span><b style={{width:`${82-i*13}%`}}/></div>)}</section></div><section className="history-list"><h2>Conversas recentes</h2>{[{d:"Hoje",t:"Organizando pensamentos",m:"22 min"},{d:"05 ago",t:"Sono e rotina noturna",m:"18 min"},{d:"01 ago",t:"Limites nas relações",m:"31 min"}].map((x,i)=><article key={i}><span className="date-badge">{x.d}</span><div><b>{x.t}</b><small>{x.m} · Serena (agente de IA)</small></div><button>Ver resumo →</button></article>)}</section></div> }
+function History({ name, sessions, onContinue }: { name:string; sessions:AccountSession[]; onContinue:()=>void }) {
+  const date = (value:string) => new Intl.DateTimeFormat("pt-BR", { day:"2-digit", month:"short" }).format(new Date(value));
+  return <div className="page history-page"><div className="page-title"><div><span className="eyebrow">Minha jornada</span><h1>Um passo de cada vez, {name || "você"}.</h1><p>Suas conversas ficam vinculadas à sua conta para a Serena compreender a continuidade da sua história.</p></div><button className="primary" onClick={onContinue}>Continuar conversa →</button></div><div className="journey-grid"><section className="summary-card"><span>Histórico protegido</span><div className="big-number">{sessions.length} <small>{sessions.length === 1 ? "conversa" : "conversas"}</small></div><p>A Serena considera sua avaliação inicial e as mensagens anteriores antes de responder.</p></section><section className="themes-card account-context"><h3>Como funciona a memória</h3><p>Somente o histórico da sua própria conta é carregado. A agente usa o contexto para evitar que você precise recomeçar do zero, sem realizar diagnóstico ou prescrição.</p></section></div><section className="history-list"><h2>Conversas recentes</h2>{sessions.length ? sessions.map((session)=><article key={session.id}><span className="date-badge">{date(session.started_at)}</span><div><b>{session.summary || "Conversa com Serena"}</b><small>{session.status === "closed" ? "Encerrada" : "Em andamento"} · Serena (agente de IA)</small></div><button onClick={onContinue}>Continuar →</button></article>) : <div className="empty-history"><b>Sua primeira conversa aparecerá aqui.</b><span>Comece pela avaliação para que a Serena conheça seu contexto inicial.</span></div>}</section></div>
+}
 
 function Admin({tab,setTab}:{tab:"documents"|"sessions";setTab:(t:"documents"|"sessions")=>void}) { return <div className="admin-page"><aside className="admin-nav"><div className="brand light"><span className="brand-mark"><span/></span><span>Serena<small>Administração</small></span></div><div className="admin-user"><span>AR</span><div><b>Ana Ribeiro</b><small>Administradora</small></div></div><nav><small>VISÃO GERAL</small><button className={tab==="sessions"?"active":""} onClick={()=>setTab("sessions")}><Icon name="trend"/> Dashboard</button><small>CONHECIMENTO</small><button className={tab==="documents"?"active":""} onClick={()=>setTab("documents")}><Icon name="file"/> Base de conteúdo <b>54</b></button><button><Icon name="book"/> Categorias</button><small>ATENDIMENTO</small><button><Icon name="chat"/> Conversas</button><button><Icon name="shield"/> Segurança</button><small>SISTEMA</small><button><Icon name="settings"/> Configurações</button></nav><div className="admin-safety"><Icon name="shield"/><b>Protocolos ativos</b><span>Última revisão: 02 ago</span></div></aside><section className="admin-content"><header><div><h1>Base de conhecimento</h1><p>Gerencie os conteúdos que fundamentam as respostas da Serena.</p></div><button className="primary" onClick={()=>alert("Selecione PDF, DOCX ou TXT para adicionar à base.")}><Icon name="plus"/> Adicionar conteúdo</button></header><div className="stats"><article><span>Documentos ativos</span><b>54</b><small><i>+4</i> este mês</small></article><article><span>Trechos indexados</span><b>812</b><small>100% processados</small></article><article><span>Uso nas respostas</span><b>94%</b><small><i>+2,4%</i> este mês</small></article><article><span>Revisão pendente</span><b>3</b><small>Requer atenção</small></article></div><div className="knowledge-card"><div className="filterbar"><div className="search"><Icon name="search"/><input placeholder="Buscar por título ou categoria..."/></div><button>Todos os status⌄</button><button>Todas as categorias⌄</button></div><table><thead><tr><th>CONTEÚDO</th><th>CATEGORIA</th><th>TRECHOS</th><th>ADICIONADO</th><th>STATUS</th><th></th></tr></thead><tbody>{documents.map((d)=><tr key={d.title}><td><span className="doc-icon"><Icon name="file"/></span><div><b>{d.title}</b><small>PDF · 1,4 MB</small></div></td><td><span className="tag">{d.tag}</span></td><td>{d.chunks}</td><td>{d.date}</td><td><span className="active-status"><span/> Ativo</span></td><td><button className="more"><Icon name="more"/></button></td></tr>)}</tbody></table><div className="table-footer">Mostrando 4 de 54 conteúdos <div><button>←</button><button className="active">1</button><button>2</button><button>3</button><button>→</button></div></div></div></section></div> }
 
 function SafetyNote({compact=false}:{compact?:boolean}) { return <section className={`safety-note ${compact?"compact":""}`}><Icon name="shield" size={24}/><div><b>Serena é uma inteligência artificial — não uma psicóloga humana ou profissional licenciada.</b><p>Ela oferece apoio conversacional e informação, mas não realiza diagnósticos, não prescreve tratamentos e não substitui acompanhamento profissional. Em caso de risco imediato, ligue 192. Para apoio emocional, CVV 188.</p></div><button>Entenda os limites</button></section> }
 
-function LoginModal({onClose,onSignIn}:{onClose:()=>void;onSignIn:(email:string,password:string)=>Promise<string>}) {
-  const [email,setEmail]=useState(""); const [password,setPassword]=useState(""); const [error,setError]=useState(""); const [loading,setLoading]=useState(false);
-  async function submit(){setLoading(true);setError("");const message=await onSignIn(email,password);setError(message);setLoading(false);}
-  return <div className="modal-backdrop" onMouseDown={onClose}><div className="login-modal" onMouseDown={(e)=>e.stopPropagation()}><button className="modal-close" onClick={onClose}>×</button><div className="brand center"><span className="brand-mark"><span/></span><span>Serena<small>cuidado conversacional</small></span></div><span className="eyebrow">Seu espaço seguro</span><h2>Bem-vinda de volta</h2><p>Entre para continuar sua jornada no seu tempo.</p><label>E-mail<input value={email} onChange={(e)=>setEmail(e.target.value)} type="email" autoComplete="email"/></label><label>Senha<input value={password} onChange={(e)=>setPassword(e.target.value)} type="password" autoComplete="current-password"/></label>{error&&<div className="ai-connection-error" role="alert">{error}</div>}<div className="login-options"><label><input type="checkbox" defaultChecked/> Lembrar de mim</label><button>Esqueci minha senha</button></div><button className="primary full" disabled={loading||!email||!password} onClick={submit}>{loading?"Entrando...":"Entrar com segurança →"}</button><small className="terms">Ao entrar, você concorda com os Termos e a Política de Privacidade.</small><div className="login-safety"><Icon name="shield"/> A sessão será protegida pelo Supabase.</div></div></div> }
+function LoginModal({onClose,onSignIn,onSignUp}:{onClose:()=>void;onSignIn:(email:string,password:string)=>Promise<string>;onSignUp:(name:string,email:string,password:string)=>Promise<string>}) {
+  const [mode,setMode]=useState<"login"|"signup">("login"); const [name,setName]=useState(""); const [email,setEmail]=useState(""); const [password,setPassword]=useState(""); const [error,setError]=useState(""); const [loading,setLoading]=useState(false);
+  async function submit(){setLoading(true);setError("");const message=mode==="login"?await onSignIn(email,password):await onSignUp(name,email,password);setError(message);setLoading(false);}
+  function changeMode(next:"login"|"signup"){setMode(next);setError("");}
+  return <div className="modal-backdrop" onMouseDown={onClose}><div className="login-modal" onMouseDown={(e)=>e.stopPropagation()}><button className="modal-close" onClick={onClose}>×</button><div className="brand center"><span className="brand-mark"><span/></span><span>Serena<small>cuidado conversacional</small></span></div><div className="auth-tabs"><button className={mode==="login"?"active":""} onClick={()=>changeMode("login")}>Entrar</button><button className={mode==="signup"?"active":""} onClick={()=>changeMode("signup")}>Criar conta</button></div><span className="eyebrow">Seu espaço seguro</span><h2>{mode==="login"?"Bem-vinda de volta":"Crie sua conta"}</h2><p>{mode==="login"?"Entre para continuar sua jornada de onde parou.":"Seu cadastro guardará sua avaliação e o histórico das conversas."}</p>{mode==="signup"&&<label>Como gostaria de ser chamado?<input value={name} onChange={(e)=>setName(e.target.value)} autoComplete="name" placeholder="Seu nome"/></label>}<label>E-mail<input value={email} onChange={(e)=>setEmail(e.target.value)} type="email" autoComplete="email"/></label><label>Senha<input value={password} onChange={(e)=>setPassword(e.target.value)} type="password" autoComplete={mode==="login"?"current-password":"new-password"} placeholder={mode==="signup"?"Pelo menos 6 caracteres":""}/></label>{error&&<div className="ai-connection-error" role="alert">{error}</div>}{mode==="login"&&<div className="login-options"><label><input type="checkbox" defaultChecked/> Lembrar de mim</label><button type="button">Esqueci minha senha</button></div>}<button className="primary full" disabled={loading||!email||password.length<6||(mode==="signup"&&!name.trim())} onClick={submit}>{loading?"Aguarde...":mode==="login"?"Entrar com segurança →":"Criar minha conta →"}</button><button className="auth-switch" onClick={()=>changeMode(mode==="login"?"signup":"login")}>{mode==="login"?"Ainda não tenho conta":"Já tenho uma conta"}</button><small className="terms">Ao continuar, você concorda com os Termos e a Política de Privacidade.</small><div className="login-safety"><Icon name="shield"/> Sua conta e seu histórico são protegidos pelo Supabase.</div></div></div> }

@@ -54,10 +54,22 @@ async function persistedContext(request: Request, sessionId?: string) {
   const token = readAccessToken(request);
   const user = token ? await supabaseUser(token) : null;
   if (!user) return { userId: "", turns: [] as Turn[] };
-  const sessions = await supabaseAdmin<Array<{ id: string }>>(`sessions?id=eq.${encodeURIComponent(sessionId)}&user_id=eq.${user.id}&select=id&limit=1`);
-  if (!sessions.length) return { userId: "", turns: [] as Turn[] };
-  const rows = await supabaseAdmin<StoredMessage[]>(`messages?session_id=eq.${encodeURIComponent(sessionId)}&select=role,content,created_at&order=created_at.desc&limit=30`);
-  return { userId: user.id, turns: rows.reverse().map((row) => ({ role: row.role, text: row.content })) };
+  const owned = await supabaseAdmin<Array<{ id: string }>>(`sessions?id=eq.${encodeURIComponent(sessionId)}&user_id=eq.${user.id}&select=id&limit=1`);
+  if (!owned.length) return { userId: "", turns: [] as Turn[] };
+
+  const [recentSessions, assessments] = await Promise.all([
+    supabaseAdmin<Array<{ id: string }>>(`sessions?user_id=eq.${user.id}&select=id&order=started_at.desc&limit=5`),
+    supabaseAdmin<Array<{ concern: string; intensity: number; duration: string; impacts: string[]; goal: string }>>(`assessments?user_id=eq.${user.id}&select=concern,intensity,duration,impacts,goal&order=created_at.desc&limit=1`),
+  ]);
+  const rows: StoredMessage[] = [];
+  for (const session of recentSessions.reverse()) {
+    const sessionRows = await supabaseAdmin<StoredMessage[]>(`messages?session_id=eq.${session.id}&select=role,content,created_at&order=created_at.asc&limit=30`);
+    rows.push(...sessionRows);
+  }
+  const assessment = assessments[0];
+  const turns: Turn[] = assessment ? [{ role: "assistant", text: `Contexto informado pela pessoa na avaliação inicial: queixa principal: ${assessment.concern}; intensidade ${assessment.intensity}/10; duração: ${assessment.duration}; impactos: ${(assessment.impacts || []).join(", ") || "não informados"}; objetivo: ${assessment.goal}. Use este contexto com discrição, sem dizer que está lendo uma ficha.` }] : [];
+  turns.push(...rows.slice(-40).map((row) => ({ role: row.role, text: row.content })));
+  return { userId: user.id, turns };
 }
 
 export async function POST(request: Request) {
